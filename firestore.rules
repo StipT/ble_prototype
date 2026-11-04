@@ -1,0 +1,86 @@
+rules_version = '2';
+
+// PPG sync backend rules.
+//
+// Data model (see functions/README.md):
+//   users/{uid}                                   optional profile doc
+//   users/{uid}/sessions/{sessionId}              session metadata (client-writable)
+//   users/{uid}/sessions/{sessionId}/chunks/{id}  ~10 s of samples, id = sessionId_chunkIndex,
+//                                                 append-only (create; identical re-write allowed)
+//   users/{uid}/sessions/{sessionId}/metrics/{id} written only by the Cloud Function
+//
+// Only the signed-in owner can read anything under users/{uid}/**. Writes are
+// whitelisted per collection; everything else is denied by default.
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function isOwner(uid) {
+      return request.auth != null && request.auth.uid == uid;
+    }
+
+    function validSession() {
+      let d = request.resource.data;
+      return d.keys().hasAll(['deviceId', 'startedAt', 'sampleRateHz'])
+        && d.keys().hasOnly(['deviceId', 'startedAt', 'endedAt', 'sampleRateHz', 'updatedAt'])
+        && d.deviceId is string && d.deviceId.size() > 0 && d.deviceId.size() <= 128
+        && d.startedAt is timestamp
+        && (!('endedAt' in d) || d.endedAt == null || d.endedAt is timestamp)
+        && (!('updatedAt' in d) || d.updatedAt is timestamp)
+        && d.sampleRateHz is int && d.sampleRateHz > 0 && d.sampleRateHz <= 1000;
+    }
+
+    // packetsPerChunk = 100 (lib/core/database/app_database.dart).
+    function validChunk(sessionId, chunkId) {
+      let d = request.resource.data;
+      let span = d.lastSequence - d.firstSequence + 1;
+      return d.keys().hasAll(['sessionId', 'chunkIndex', 'firstSequence', 'lastSequence',
+                              'packetCount', 'samplesPerPacket', 'missingSequences',
+                              'startedAt', 'sampleRateHz', 'deviceId', 'encoding', 'samples'])
+        && d.keys().hasOnly(['sessionId', 'chunkIndex', 'firstSequence', 'lastSequence',
+                             'packetCount', 'samplesPerPacket', 'missingSequences',
+                             'startedAt', 'sampleRateHz', 'deviceId', 'encoding', 'samples'])
+        && d.sessionId == sessionId
+        && d.chunkIndex is int && d.chunkIndex >= 0
+        && chunkId == sessionId + '_' + string(d.chunkIndex)
+        && d.firstSequence is int && d.lastSequence is int
+        && d.firstSequence >= d.chunkIndex * 100
+        && d.lastSequence < (d.chunkIndex + 1) * 100
+        && d.lastSequence >= d.firstSequence
+        && d.packetCount is int && d.packetCount >= 1 && d.packetCount <= span
+        && d.samplesPerPacket is int && d.samplesPerPacket > 0 && d.samplesPerPacket <= 64
+        && d.missingSequences is list && d.missingSequences.size() == span - d.packetCount
+        && d.startedAt is timestamp
+        && d.sampleRateHz is int && d.sampleRateHz > 0 && d.sampleRateHz <= 1000
+        && d.deviceId is string && d.deviceId.size() > 0 && d.deviceId.size() <= 128
+        && d.encoding == 'gzip-u24le'
+        && d.samples is bytes && d.samples.size() > 0 && d.samples.size() <= 524288;
+    }
+
+    match /users/{uid} {
+      allow read, create, update: if isOwner(uid);
+      allow delete: if false;
+    }
+
+    match /users/{uid}/{document=**} {
+      allow read: if isOwner(uid);
+    }
+
+    match /users/{uid}/sessions/{sessionId} {
+      allow create, update: if isOwner(uid) && validSession();
+      allow delete: if false;
+
+      match /chunks/{chunkId} {
+        allow create: if isOwner(uid) && validChunk(sessionId, chunkId);
+        // Append-only: an upload retry that rewrites the identical document is a
+        // no-op and allowed (client SDKs only have set(), not create()); any real
+        // change or delete is denied.
+        allow update: if isOwner(uid) && request.resource.data == resource.data;
+        allow delete: if false;
+      }
+
+      match /metrics/{chunkId} {
+        allow write: if false;
+      }
+    }
+  }
+}

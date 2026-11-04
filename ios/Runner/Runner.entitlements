@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- Core NFC tag reading for NFCTagReaderSession (nfc_manager polls
+	     ISO 14443 / ISO 15693 tags and reads their NDEF message). Only TAG is
+	     listed: App Store validation rejects the legacy "NDEF" value
+	     ("NDEF is disallowed") for iOS 13+ apps. Needs the "NFC Tag Reading"
+	     capability on a paid Apple developer account. -->
+	<key>com.apple.developer.nfc.readersession.formats</key>
+	<array>
+		<string>TAG</string>
+	</array>
+</dict>
+</plist>
